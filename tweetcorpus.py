@@ -12,16 +12,20 @@ class TweetCorpus:
     """
     REPEAT_PATTERN = regex.compile(r'((\w)\2{2,})')
     
-    def __init__(self, corpus, preserve_case = False, reduce_len = True, language = 'auto'):
+    def __init__(self, corpus, tweetnos = None, preserve_case = False, reduce_len = True, language = 'auto'):
         assert(isinstance(corpus, list) and all([isinstance(t, str) for t in corpus]))
         self.language = language
-        self.corpus = corpus
+        if tweetnos is None:
+            self.corpus = [(i + 1, corpus[i]) for i in range(0, len(corpus))]
+        else:
+            assert(len(corpus) == len(tweetnos))
+            self.corpus = [(tweetnos[i], corpus[i]) for i in range(0, len(corpus))]
         self.preserve_case = preserve_case
         self.reduce_len = reduce_len
     
     def tokenize(self):
         if not hasattr(self, 'tokens'):
-            self.tokens = [twokenize.tokenizeRawTweetText(self.__prepare_for_tokenizer(t)) for t in self.corpus]
+            self.tokens = [(tweetno, twokenize.tokenizeRawTweetText(self.__prepare_for_tokenizer(t))) for tweetno,t in self.corpus]
         
         return self.tokens
     
@@ -42,10 +46,10 @@ class TweetCorpus:
             tokens = self.tokenize()
             classifier = TweetTokenClassifier() # instantiate without vocabulary
             
-            self.classification = [classifier.classify(t) for t in tokens]
+            self.classification = [(tweetno, classifier.classify(t)) for tweetno,t in tokens]
             
             if vocabulary is None:
-                vocab = [w for t in self.get_tokens_by_type(['contentword', 'stopword', 'mention', 'hashtag', 'ellipsis'], extract='token') for w in t]
+                vocab = [w for _,t in self.get_tokens_by_type(['contentword', 'stopword', 'mention', 'hashtag', 'ellipsis'], extract='token') for w in t]
                 vocabulary = set([vocab[i] for i in range(len(vocab)) if not classifier.ELLIPSIS_PATTERN.match(vocab[i]) and (i == len(vocab) - 1 or not classifier.ELLIPSIS_PATTERN.match(vocab[i + 1]))])
             
             self.__flag_truncations(vocabulary)
@@ -56,7 +60,7 @@ class TweetCorpus:
         c = self.classify()
         
         for i in range(len(c)):
-            tokens = c[i]
+            _,tokens = c[i]
             for j in range(len(tokens)):
                 if (tokens[j]['position'] >= 2 and
                     tokens[j]['type'] == 'ellipsis' and
@@ -64,26 +68,6 @@ class TweetCorpus:
                     not any([t['type'] in ['contentword', 'stopword'] for t in tokens[j:(len(tokens) - 1)]]) and
                     (len(tokens[j - 1]['token']) < 2 or tokens[j - 1]['token'] not in vocabulary)):
                         tokens[j - 1]['type'] = tokens[j - 1]['type'] + '_truncated'
-    
-    def analyze_sentiments(self):
-        try:
-            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-        except ImportError:
-            print("Install vaderSentiment to do sentiment analysis; pip install vaderSentiment")
-            return False
-        
-        analyzer = SentimentIntensityAnalyzer()
-        
-        tweets_clean = self.clean()
-        scores = []
-        
-        for i in range(len(tweets_clean)):
-            vs = analyzer.polarity_scores(tweets_clean[i])
-            vs['tweetno'] = i + 1
-            vs['tweet_clean'] = tweets_clean[i]
-            scores.append(vs)
-        
-        return scores
     
     def get_tokens_by_type(self, types = ['contentword'], extract = None):
         if isinstance(types, str):
@@ -98,28 +82,28 @@ class TweetCorpus:
         c = self.classify()
         
         if extract is None:
-            return [__filter_type(t, types) for t in c]
+            return [(tweetno, __filter_type(t, types)) for tweetno,t in c]
         else:
-            return [__extract_by_type(t, types, extract) for t in c]
-    
+            return [(tweetno, __extract_by_type(t, types, extract)) for tweetno,t in c]
+
     def clean(self, keep_types = ['contentword', 'stopword']):
-        return [' '.join(w) for w in self.get_tokens_by_type(keep_types, extract='token')]
-    
+        return [(tweetno, ' '.join(w)) for tweetno,w in self.get_tokens_by_type(keep_types, extract='token')]
+
     def vocabulary(self, types = ['contentword']):
-        return sorted(set([w for t in self.get_tokens_by_type(types, extract='token') for w in t]))
-    
+        return sorted(set([w for _,t in self.get_tokens_by_type(types, extract='token') for w in t]))
+
     def as_dict(self):
         c = self.classify()
-        
+
         result = []
-        
+
         for i in range(len(c)):
-            t = list(c[i])
+            tweetno,t = list(c[i])
             if (len(t) > 0):
                 for token in t:
-                    token['tweetno'] = i + 1
+                    token['tweetno'] = tweetno
                     result.append(token)
-        
+
         return result
     
     def tokens_csv(self, filename):
@@ -131,6 +115,26 @@ class TweetCorpus:
             writer.writeheader()
             for w in out:
                 writer.writerow(w)
+    
+    def analyze_sentiments(self):
+        try:
+            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+        except ImportError:
+            print("Install vaderSentiment to do sentiment analysis; pip install vaderSentiment")
+            return False
+        
+        analyzer = SentimentIntensityAnalyzer()
+        
+        tweets_clean = self.clean()
+        scores = []
+        
+        for i in range(len(tweets_clean)):
+            vs = analyzer.polarity_scores(tweets_clean[i][1])
+            vs['tweetno'] = tweets_clean[i][0]
+            vs['tweet_clean'] = tweets_clean[i][1]
+            scores.append(vs)
+        
+        return scores
     
     def sentiments_csv(self, filename):
         sent = self.analyze_sentiments()
@@ -145,15 +149,9 @@ class TweetCorpus:
     def retweets(self):
         if not hasattr(self, 'retweet_indices'):
             c = self.classify()
-            self.retweet_indices = [i for i in range(0, len(c)) if any([t['position'] < 1 and t['token'] in ['rt', 'RT'] for t in c[i]])]
+            self.retweet_indices = [tweetno for tweetno,tokens in c if any([t['position'] < 1 and t['token'] in ['rt','RT'] for t in tokens])]
         
         return self.retweet_indices
-    
-    def original_tokens(self, types = ['contentword'], extract=None):
-        tokens = self.get_tokens_by_type(types, extract=extract)
-        original_indices = set(range(0, len(tokens))) - set(self.retweets())
-        return [(i, tokens[i]) for i in original_indices]
-
 
 class TweetTokenClassifier:
     STOPWORDS = {
@@ -189,7 +187,7 @@ class TweetTokenClassifier:
     EMAIL_PATTERN = regex.compile(twokenize.Email)
     NUMBER_PATTERN = r'\-?[,.]?\d+(?:[,.]\d+)*'
     NUMBERS_PATTERN = regex.compile(r"(?:(?:[\p{Sc}]|EUR|USD|GBP)\s*)?" + NUMBER_PATTERN + "(?:\s*(?:%|[\p{Sc}]|EUR|USD|GBP))?")
-    NUMERIC_EXPRESSION_PATTERN = regex.compile(NUMBER_PATTERN + '(?:[+-/*=()]+' + NUMBER_PATTERN + ')+')
+    NUMERIC_EXPRESSION_PATTERN = regex.compile(NUMBER_PATTERN + '(?:[+-/*=():]+' + NUMBER_PATTERN + ')+')
     MIXED_PATTERN = regex.compile(r'[^\W\d]+(?:[+-/*=()]+|[^\W\d]+)*' + NUMBER_PATTERN + '[\w\d+-/*=(),.]*|' + NUMBER_PATTERN + '(?:[+-/*=()]+|' + NUMBER_PATTERN + ')*[^\W\d]+[\w\d+-/*=(),.]*')
     EMOTICON_PATTERN = regex.compile(twokenize.emoticon)
     PRE_STEM_PATTERNS = {
