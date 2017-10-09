@@ -5,118 +5,138 @@ from nltk.corpus import stopwords
 from twokenize import twokenize
 # use the ark-twokenize-py fork by Sentimentron, as it gives better results than the casual tokenizer from nltk
 from stemming.porter2 import stem # Porter2 works slightly better
+from itertools import tee
+from joblib import Parallel, delayed # for parallel processing
 
 class TweetCorpus:
+    REPEAT_PATTERN = regex.compile(r'((\w)\2{3,})')
+
     """
     Class designed to simplify working with a corpus of raw tweets
-    """
-    REPEAT_PATTERN = regex.compile(r'((\w)\2{2,})')
-    
-    def __init__(self, corpus, tweetnos = None, preserve_case = False, reduce_len = True, language = 'auto'):
+    """    
+    def __init__(self, corpus, vocabulary = None, tweetnos = None, preserve_case = False, reduce_len = True, cache_corpus = False, cache_tokens = False, cache_classification = False, language = 'auto', parallel = True, parallel_backend = "loky", njobs = -1):
         assert(isinstance(corpus, list) and all([isinstance(t, str) for t in corpus]))
-        self.language = language
-        if tweetnos is None:
-            self.corpus = [(i + 1, corpus[i]) for i in range(0, len(corpus))]
-        else:
-            assert(len(corpus) == len(tweetnos))
-            self.corpus = [(tweetnos[i], corpus[i]) for i in range(0, len(corpus))]
+
+        self.language = language         # Language of tweets; either a string (appies to all Tweets) or a list of strings of the same length as the corpus, with each Tweet's language
+        self.vocabulary = vocabulary     # Vocabulary to use for distinguishing between truncated words and valid words
+
+        self.parallel = parallel
+
+        if parallel:
+            self.njobs = njobs
+            self.parallel_backend = parallel_backend
+
+        self.corpus = corpus
+        self.tweetnos = tweetnos
+
         self.preserve_case = preserve_case
         self.reduce_len = reduce_len
-    
-    def tokenize(self):
-        if not hasattr(self, 'tokens'):
-            self.tokens = [(tweetno, twokenize.tokenizeRawTweetText(self.__prepare_for_tokenizer(t))) for tweetno,t in self.corpus]
-        
-        return self.tokens
-    
-    def __prepare_for_tokenizer(self, text):
+
+    def sents(self):
+        if self.tweetnos is None:
+            def counter():
+                n = 1
+                while True:
+                    yield n
+                    n = n + 1
+            return ((tweetno, text) for tweetno, text in zip(counter(), self.corpus))
+        else:
+            assert(len(self.corpus) == len(self.tweetnos))
+            return ((tweetno, text) for tweetno, text in zip(self.tweetnos, self.corpus))
+
+    @staticmethod
+    def _tokenize1(tno_text, preserve_case, reduce_len):
         """
-        Do any required text pre-processing before starting tokenization
+        Pre-process and tokenize a single tweet
         """
-        if not self.preserve_case:
+        (tweetno, text) = tno_text
+
+        if not preserve_case:
             text = text.lower()
-        
-        if self.reduce_len:
-            text = regex.sub(self.REPEAT_PATTERN, lambda m: m.groups()[1] + m.groups()[1], text)
-        
-        return text
-    
-    def classify(self, vocabulary = None, force = False):
-        if not hasattr(self, 'classification') or force:
-            tokens = self.tokenize()
-            classifier = TweetTokenClassifier() # instantiate without vocabulary
-            
-            self.classification = [(tweetno, classifier.classify(t)) for tweetno,t in tokens]
-            
-            if vocabulary is None:
-                vocab = [w for _,t in self.get_tokens_by_type(['contentword', 'stopword', 'mention', 'hashtag', 'ellipsis'], extract='token') for w in t]
-                vocabulary = set([vocab[i] for i in range(len(vocab)) if not classifier.ELLIPSIS_PATTERN.match(vocab[i]) and (i == len(vocab) - 1 or not classifier.ELLIPSIS_PATTERN.match(vocab[i + 1]))])
-            
-            self.__flag_truncations(vocabulary)
-        
-        return self.classification
-    
-    def __flag_truncations(self, vocabulary):
-        c = self.classify()
-        
-        for i in range(len(c)):
-            _,tokens = c[i]
-            for j in range(len(tokens)):
-                if (tokens[j]['position'] >= 2 and
-                    tokens[j]['type'] == 'ellipsis' and
-                    tokens[j - 1]['type'] in ['contentword', 'stopword', 'mention', 'hashtag', 'url'] and
-                    not any([t['type'] in ['contentword', 'stopword'] for t in tokens[j:(len(tokens) - 1)]]) and
-                    (len(tokens[j - 1]['token']) < 2 or tokens[j - 1]['token'] not in vocabulary)):
-                        tokens[j - 1]['type'] = tokens[j - 1]['type'] + '_truncated'
-    
-    def get_tokens_by_type(self, types = ['contentword'], extract = None):
+
+        if reduce_len:
+            text = TweetCorpus.REPEAT_PATTERN.sub(lambda m: m.groups()[1]*3, text)
+
+        return (tweetno, twokenize.tokenizeRawTweetText(text))
+
+    def tokenize(self, parallel = None):
+        if parallel is None:
+            parallel = self.parallel
+
+        if parallel:
+            return Parallel(n_jobs=self.njobs)(delayed(TweetCorpus._tokenize1)(tno_text, self.preserve_case, self.reduce_len) for tno_text in self.sents())
+        else:
+            return (TweetCorpus._tokenize1(tno_text, self.preserve_case, self.reduce_len) for tno_text in self.sents())
+
+    @staticmethod
+    def _classify1(tno_tokens, classifier):
+        return (tno_tokens[0], classifier.classify(tno_tokens[1]))
+
+    @staticmethod
+    def _classify2(tno_text, classifier, preserve_case, reduce_len):
+        tweetno, tokens = TweetCorpus._tokenize1(tno_text, preserve_case=preserve_case, reduce_len=reduce_len)
+        return (tweetno, classifier.classify(tokens))
+
+    def classify(self, parallel = None):
+        if parallel is None:
+            parallel = self.parallel
+
+        if parallel:
+            return Parallel(n_jobs=self.njobs)(delayed(TweetCorpus._classify2)(tno_text, classifier = self.get_classifier(), preserve_case = self.preserve_case, reduce_len = self.reduce_len) for tno_text in self.sents())
+        else:
+            return (TweetCorpus._classify2(tno_text, classifier = self.get_classifier(), preserve_case = self.preserve_case, reduce_len = self.reduce_len) for tno_text in self.sents())
+
+    @staticmethod
+    def _get_tokens_by_type1(tno_text, types, extract, preserve_case, reduce_len, classifier): # function to run on a single array of tokens
+        assert(isinstance(types, list))
+
+        tno_tokens = TweetCorpus._tokenize1(tno_text, preserve_case, reduce_len)
+        tno_ctokens = TweetCorpus._classify1(tno_tokens, classifier)
+
+        if extract is None:
+            return (tno_ctokens[0], [t for t in tno_ctokens[1] if t['type'] in types])
+        else:
+            return (tno_ctokens[0], [t[extract] for t in tno_ctokens[1] if t['type'] in types])
+
+    def get_tokens_by_type(self, types = ['contentword'], extract = None, parallel = None):
         if isinstance(types, str):
             types = [types]
-        
-        def __filter_type(tokens, types): # function to run on a single array of tokens
-            return [t for t in tokens if t['type'] in types]
-        
-        def __extract_by_type(tokens, types, extract):
-            return [t[extract] for t in tokens if t['type'] in types]
-        
-        c = self.classify()
-        
-        if extract is None:
-            return [(tweetno, __filter_type(t, types)) for tweetno,t in c]
+
+        if parallel is None:
+            parallel = self.parallel
+
+        classifier = self.get_classifier()
+
+        if parallel:
+            return Parallel(n_jobs=self.njobs)(delayed(TweetCorpus._get_tokens_by_type1)(tno_text, types, extract, self.preserve_case, self.reduce_len, classifier) for tno_text in self.sents())
         else:
-            return [(tweetno, __extract_by_type(t, types, extract)) for tweetno,t in c]
+            return (TweetCorpus._get_tokens_by_type1(tno_text, types, extract, self.preserve_case, self.reduce_len, classifier) for tno_text in self.sents())
+
+    def get_classifier(self):
+        if not hasattr(self, 'classifier'):
+            self.classifier = TweetTokenClassifier(vocabulary = self.vocabulary)
+
+        return self.classifier
 
     def clean(self, keep_types = ['contentword', 'stopword']):
-        return [(tweetno, ' '.join(w)) for tweetno,w in self.get_tokens_by_type(keep_types, extract='token')]
+        return ((tweetno, ' '.join(w)) for tweetno,words in self.get_tokens_by_type(keep_types, extract='token'))
 
-    def vocabulary(self, types = ['contentword']):
-        return sorted(set([w for _,t in self.get_tokens_by_type(types, extract='token') for w in t]))
+    def build_vocabulary(self, types = ['contentword'], parallel = None):
+        return sorted(set([t for _,tokens in self.get_tokens_by_type(types, extract='token', parallel = parallel) for t in tokens]))
 
-    def as_dict(self):
-        c = self.classify()
-
-        result = []
-
-        for i in range(len(c)):
-            tweetno,t = list(c[i])
-            if (len(t) > 0):
-                for token in t:
-                    token['tweetno'] = tweetno
-                    result.append(token)
-
-        return result
-    
-    def tokens_csv(self, filename):
-        out = self.as_dict()
+    def tokens_csv(self, filename, parallel = None):
         fieldnames = ['tweetno', 'position', 'token', 'stem', 'type']
-        
+
         with open(filename, 'w') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames, quoting=csv.QUOTE_NONNUMERIC)
             writer.writeheader()
-            for w in out:
-                writer.writerow(w)
-    
-    def analyze_sentiments(self):
+            for tweetno, ctokens in self.classify(parallel = parallel):
+                for ct in ctokens:
+                    ct['tweetno'] = tweetno
+                    writer.writerow(ct)
+
+    # TODO: parallellize this function
+    def sentiments(self):
         try:
             from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
         except ImportError:
@@ -125,31 +145,30 @@ class TweetCorpus:
         
         analyzer = SentimentIntensityAnalyzer()
         
-        tweets_clean = self.clean()
-        scores = []
+        def __sentiment(tweet_clean):
+            vs = analyzer.polarity_scores(tweet_clean)
+            vs['tweet_clean'] = tweet_clean
+            return vs
         
-        for i in range(len(tweets_clean)):
-            vs = analyzer.polarity_scores(tweets_clean[i][1])
-            vs['tweetno'] = tweets_clean[i][0]
-            vs['tweet_clean'] = tweets_clean[i][1]
-            scores.append(vs)
-        
-        return scores
+        return ((tweetno, __sentiment(tweet_clean)) for tweetno, tweet_clean in self.clean())
     
     def sentiments_csv(self, filename):
-        sent = self.analyze_sentiments()
+        def __append_tweetno(tweetno, scores):
+            scores['tweetno'] = tweetno
+            return scores
+        
         fieldnames = ['tweetno', 'tweet_clean', 'pos', 'neg', 'neu', 'compound']
         
         with open(filename, 'w') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames, quoting=csv.QUOTE_NONNUMERIC)
             writer.writeheader()
-            for w in sent:
-                writer.writerow(w)
+            for tweetno, scores in self.sentiments():
+                writer.writerow(__append_tweetno(tweetno, scores))
     
-    def retweets(self):
+    def retweets(self, parallel = None):
+        # This is not a generator expression because usually, the entire set is needed
         if not hasattr(self, 'retweet_indices'):
-            c = self.classify()
-            self.retweet_indices = [tweetno for tweetno,tokens in c if any([t['position'] < 1 and t['token'] in ['rt','RT'] for t in tokens])]
+            self.retweet_indices = [tweetno for tweetno,tokens in self.classify(parallel = parallel) if any([t['position'] < 1 and t['token'] in ['rt','RT'] for t in tokens])]
         
         return self.retweet_indices
 
@@ -186,7 +205,9 @@ class TweetTokenClassifier:
     HASHTAG_PATTERN = regex.compile(r'[#＃]*([#＃][\w_]*[^\W\d][\w_]*)')
     EMAIL_PATTERN = regex.compile(twokenize.Email)
     NUMBER_PATTERN = r'\-?[,.]?\d+(?:[,.]\d+)*'
-    NUMBERS_PATTERN = regex.compile(r"(?:(?:[\p{Sc}]|EUR|USD|GBP)\s*)?" + NUMBER_PATTERN + "(?:\s*(?:%|[\p{Sc}]|EUR|USD|GBP))?")
+    CURRENCY_PATTERN = r"(?:(?:[\p{Sc}]|EUR|USD|GBP)\s*)?" + NUMBER_PATTERN + "(?:\s*(?:%|[\p{Sc}]|EUR|USD|GBP))?"
+    RANK_PATTERN = r'(?:' + NUMBER_PATTERN + '(?:st|ST|nd|ND|rd|RD|th|TH)|#' + NUMBER_PATTERN + ')'
+    NUMBERS_PATTERN = regex.compile(NUMBER_PATTERN + '|' + CURRENCY_PATTERN + '|' + RANK_PATTERN)
     NUMERIC_EXPRESSION_PATTERN = regex.compile(NUMBER_PATTERN + '(?:[+-/*=():]+' + NUMBER_PATTERN + ')+')
     MIXED_PATTERN = regex.compile(r'[^\W\d]+(?:[+-/*=()]+|[^\W\d]+)*' + NUMBER_PATTERN + '[\w\d+-/*=(),.]*|' + NUMBER_PATTERN + '(?:[+-/*=()]+|' + NUMBER_PATTERN + ')*[^\W\d]+[\w\d+-/*=(),.]*')
     EMOTICON_PATTERN = regex.compile(twokenize.emoticon)
@@ -202,6 +223,10 @@ class TweetTokenClassifier:
         # UCS-2
         EMOJIS_PATTERN = regex.compile(u'([\u2600-\u27BF]\uFE0F?)|([\uD83C][\uDF00-\uDFFF])|([\uD83D][\uDC00-\uDE4F])|([\uD83D][\uDE80-\uDEFF])|(\uFE0F)')
     
+    def __init__(self, vocabulary = None):
+        if vocabulary is not None:
+            self.vocabulary = set(vocabulary)
+
     def classify(self, tokens, language = 'english'):
         assert(isinstance(tokens, list) and all([isinstance(t, str) for t in tokens]))
         
@@ -270,7 +295,21 @@ class TweetTokenClassifier:
             
             position = position + 1
         
-        return result
+        return self.__flag_truncations(result)
+    
+    def __flag_truncations(self, tokens):
+        for j in range(len(tokens)):
+            if (tokens[j]['position'] >= 2 and
+                tokens[j]['type'] == 'ellipsis' and
+                tokens[j - 1]['type'] in ['contentword', 'stopword', 'mention', 'hashtag', 'url'] and
+                not any([t['type'] in ['contentword', 'stopword'] for t in tokens[j:(len(tokens) - 1)]])):
+                if hasattr(self, 'vocabulary'):
+                    if (len(tokens[j - 1]['token']) < 2 or tokens[j - 1]['token'] not in self.vocabulary):
+                        tokens[j - 1]['type'] = tokens[j - 1]['type'] + '_truncated'
+                else:
+                    tokens[j - 1]['type'] = tokens[j - 1]['type'] + '_truncated'
+        
+        return tokens
     
     def __get_stopwords(self, language = 'english'):
         if language not in self.STOPWORDS.keys():
