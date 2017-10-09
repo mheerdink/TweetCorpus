@@ -8,7 +8,7 @@ Most of the functions are parallelized and/ or use little memory through the use
 
 # Typical usage
 
-```
+```python
 from TweetCorpus import tweetcorpus
 
 with open(filename) as f:
@@ -39,7 +39,7 @@ twc.sentiments_csv('sentiments_export.csv')
 
 # Usage with a large dataset in csv format
 
-```
+```python
 import csv
 from TweetCorpus import tweetcorpus
 from TweetCorpus import tweetcorpus
