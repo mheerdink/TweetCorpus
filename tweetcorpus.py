@@ -1,12 +1,10 @@
-import sys
-import csv
-import regex
+import sys, csv, regex, itertools
 from nltk.corpus import stopwords
 from twokenize import twokenize
 # use the ark-twokenize-py fork by Sentimentron, as it gives better results than the casual tokenizer from nltk
 from stemming.porter2 import stem # Porter2 works slightly better
-from itertools import tee
 from joblib import Parallel, delayed # for parallel processing
+from types import GeneratorType # for GeneratorType
 
 class TweetCorpus:
     REPEAT_PATTERN = regex.compile(r'((\w)\2{3,})')
@@ -14,8 +12,8 @@ class TweetCorpus:
     """
     Class designed to simplify working with a corpus of raw tweets
     """    
-    def __init__(self, corpus, vocabulary = None, tweetnos = None, preserve_case = False, reduce_len = True, cache_corpus = False, cache_tokens = False, cache_classification = False, language = 'auto', parallel = True, parallel_backend = "loky", njobs = -1):
-        assert(isinstance(corpus, list) and all([isinstance(t, str) for t in corpus]))
+    def __init__(self, corpus, vocabulary = None, preserve_case = False, reduce_len = True, cache_corpus = False, cache_tokens = False, cache_classification = False, language = 'auto', parallel = True, parallel_backend = "loky", njobs = -1):
+        assert(isinstance(corpus, GeneratorType) or (isinstance(corpus, list) and (all([isinstance(t, tuple) for t in corpus]) or all([isinstance(t, str) for t in corpus])))) # corpus should either be a generator or a list of strings/tuples
 
         self.language = language         # Language of tweets; either a string (appies to all Tweets) or a list of strings of the same length as the corpus, with each Tweet's language
         self.vocabulary = vocabulary     # Vocabulary to use for distinguishing between truncated words and valid words
@@ -27,22 +25,34 @@ class TweetCorpus:
             self.parallel_backend = parallel_backend
 
         self.corpus = corpus
-        self.tweetnos = tweetnos
 
         self.preserve_case = preserve_case
         self.reduce_len = reduce_len
 
     def sents(self):
-        if self.tweetnos is None:
-            def counter():
-                n = 1
-                while True:
-                    yield n
-                    n = n + 1
-            return ((tweetno, text) for tweetno, text in zip(counter(), self.corpus))
+        def counter():
+            n = 1
+            while True:
+                yield n
+                n = n + 1
+
+        if isinstance(self.corpus, GeneratorType) | isinstance(self.corpus, itertools._tee):
+            self.corpus, test = itertools.tee(self.corpus)
+            first = test.__next__() # get first element
+            self.corpus, copy = itertools.tee(self.corpus)
+
+            if isinstance(first, tuple):  # we have tweetnos
+                return copy
+            elif isinstance(first, str): # we don't have tweetnos, so generate these on the fly
+                return zip(counter(), copy)
         else:
-            assert(len(self.corpus) == len(self.tweetnos))
-            return ((tweetno, text) for tweetno, text in zip(self.tweetnos, self.corpus))
+            if isinstance(self.corpus[0], tuple):  # we have tweetnos
+                return self.corpus
+            elif isinstance(self.corpus[0], str):
+                return zip(counter(), self.corpus)
+
+        raise InputError('self.corpus', 'Neither a generator, nor a list of strings')
+        return []
 
     @staticmethod
     def _tokenize1(tno_text, preserve_case, reduce_len):
@@ -121,8 +131,8 @@ class TweetCorpus:
     def clean(self, keep_types = ['contentword', 'stopword']):
         return ((tweetno, ' '.join(w)) for tweetno,words in self.get_tokens_by_type(keep_types, extract='token'))
 
-    def build_vocabulary(self, types = ['contentword'], parallel = None):
-        return sorted(set([t for _,tokens in self.get_tokens_by_type(types, extract='token', parallel = parallel) for t in tokens]))
+    def build_vocabulary(self, types = ['contentword'], extract='token', parallel = None):
+        return set([t for _,tokens in self.get_tokens_by_type(types, extract = extract, parallel = parallel) for t in tokens])
 
     def tokens_csv(self, filename, parallel = None):
         fieldnames = ['tweetno', 'position', 'token', 'stem', 'type']
