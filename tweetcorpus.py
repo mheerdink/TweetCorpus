@@ -59,6 +59,8 @@ class TweetCorpus:
         """
         Pre-process and tokenize a single tweet
         """
+        assert(isinstance(tno_text, tuple))
+
         (tweetno, text) = tno_text
 
         if not preserve_case:
@@ -69,6 +71,76 @@ class TweetCorpus:
 
         return (tweetno, twokenize.tokenizeRawTweetText(text))
 
+    @staticmethod
+    def _classify1(tno_text, tc):
+        """
+        Classify all tokens in a tweet
+        """
+        assert(isinstance(tno_text, tuple))
+        assert(isinstance(tc, TweetCorpus))
+
+        (tweetno, tokens) = TweetCorpus._tokenize1(tno_text, tc)
+        classifier = tc.get_classifier()
+
+        return (tweetno, classifier.classify(tokens))
+
+    @staticmethod
+    def _classify1(tno_tokens, classifier):
+        """
+        Classify all tokens in a tweet
+        """
+        assert(isinstance(tno_tokens, tuple))
+        assert(isinstance(classifier, TweetTokenClassifier))
+
+        return (tno_tokens[0], classifier.classify(tno_tokens[1]))
+
+    @staticmethod
+    def _classify2(tno_text, preserve_case, reduce_len, classifier):
+        return TweetCorpus._classify1(TweetCorpus._tokenize1(tno_text, preserve_case, reduce_len), classifier)
+
+    @staticmethod
+    def _get_tokens_by_type1(tno_ctokens, types, extract): # function to run on a single array of tokens
+        """
+        Get all tokens of a certain type from a tweet, and potentially extract a single attribute
+        """
+        assert(isinstance(tno_ctokens, tuple))
+        assert(isinstance(types, list))
+        assert(isinstance(extract, str) or extract is None)
+
+        (tweetno, ctokens) = tno_ctokens
+
+        if extract is None:
+            return (tweetno, [t for t in ctokens if t['type'] in types])
+        else:
+            return (tweetno, [t[extract] for t in ctokens if t['type'] in types])
+
+    @staticmethod
+    def _get_tokens_by_type2(tno_text, preserve_case, reduce_len, classifier, types, extract):
+        return TweetCorpus._get_tokens_by_type1(TweetCorpus._classify1(TweetCorpus._tokenize1(tno_text, preserve_case, reduce_len), classifier), types, extract)
+
+    @staticmethod
+    def _clean1(tno_ctokens, types, extract):
+        """
+        Clean a tweet
+        """
+        (tweetno, ctokens) = TweetCorpus._get_tokens_by_type1(tno_ctokens, types, extract)
+        return (tweetno, ' '.join(ctokens))
+
+    @staticmethod
+    def _clean2(tno_text, preserve_case, reduce_len, classifier, types, extract):
+        return TweetCorpus._clean1(TweetCorpus._classify1(TweetCorpus._tokenize1(tno_text, preserve_case, reduce_len), classifier), types, extract)
+
+    @staticmethod
+    def _sentiment1(tno_clean, analyzer):
+        """
+        Sentiment-analyze a tweet
+        """
+        scores = analyzer.polarity_scores(tno_clean[1])
+        return (tno_clean[0], scores)
+
+    def _sentiment2(tno_text, preserve_case, reduce_len, classifier, types, extract, analyzer):
+        return TweetCorpus._sentiment1(TweetCorpus._clean1(TweetCorpus._classify1(TweetCorpus._tokenize1(tno_text, preserve_case, reduce_len), classifier), types, extract), analyzer)
+
     def tokenize(self, parallel = None):
         if parallel is None:
             parallel = self.parallel
@@ -78,35 +150,22 @@ class TweetCorpus:
         else:
             return (TweetCorpus._tokenize1(tno_text, self.preserve_case, self.reduce_len) for tno_text in self.sents())
 
-    @staticmethod
-    def _classify1(tno_tokens, classifier):
-        return (tno_tokens[0], classifier.classify(tno_tokens[1]))
+    def get_classifier(self):
+        if not hasattr(self, 'classifier'):
+            self.classifier = TweetTokenClassifier(vocabulary = self.vocabulary)
 
-    @staticmethod
-    def _classify2(tno_text, classifier, preserve_case, reduce_len):
-        tweetno, tokens = TweetCorpus._tokenize1(tno_text, preserve_case=preserve_case, reduce_len=reduce_len)
-        return (tweetno, classifier.classify(tokens))
+        return self.classifier
 
     def classify(self, parallel = None):
         if parallel is None:
             parallel = self.parallel
 
+        classifier = self.get_classifier()
+
         if parallel:
-            return Parallel(n_jobs=self.njobs)(delayed(TweetCorpus._classify2)(tno_text, classifier = self.get_classifier(), preserve_case = self.preserve_case, reduce_len = self.reduce_len) for tno_text in self.sents())
+            return Parallel(n_jobs=self.njobs)(delayed(TweetCorpus._classify2)(tno_text, self.preserve_case, self.reduce_len, classifier) for tno_text in self.sents())
         else:
-            return (TweetCorpus._classify2(tno_text, classifier = self.get_classifier(), preserve_case = self.preserve_case, reduce_len = self.reduce_len) for tno_text in self.sents())
-
-    @staticmethod
-    def _get_tokens_by_type1(tno_text, types, extract, preserve_case, reduce_len, classifier): # function to run on a single array of tokens
-        assert(isinstance(types, list))
-
-        tno_tokens = TweetCorpus._tokenize1(tno_text, preserve_case, reduce_len)
-        tno_ctokens = TweetCorpus._classify1(tno_tokens, classifier)
-
-        if extract is None:
-            return (tno_ctokens[0], [t for t in tno_ctokens[1] if t['type'] in types])
-        else:
-            return (tno_ctokens[0], [t[extract] for t in tno_ctokens[1] if t['type'] in types])
+            return (TweetCorpus._classify1(tno_tokens, classifier) for tno_tokens in self.tokenize(parallel = False))
 
     def get_tokens_by_type(self, types = ['contentword'], extract = None, parallel = None):
         if isinstance(types, str):
@@ -115,23 +174,45 @@ class TweetCorpus:
         if parallel is None:
             parallel = self.parallel
 
-        classifier = self.get_classifier()
+        if parallel:
+            return Parallel(n_jobs=self.njobs)(delayed(TweetCorpus._get_tokens_by_type2)(tno_text, self.preserve_case, self.reduce_len, self.get_classifier(), types, extract) for tno_text in self.sents())
+        else:
+            return (TweetCorpus._get_tokens_by_type1(tno_ctokens, types, extract) for tno_ctokens in self.classify(parallel = False))
+
+    def clean(self, types = ['contentword', 'stopword'], extract = 'token', parallel = None):
+        if isinstance(types, str):
+            types = [types]
+
+        if parallel is None:
+            parallel = self.parallel
 
         if parallel:
-            return Parallel(n_jobs=self.njobs)(delayed(TweetCorpus._get_tokens_by_type1)(tno_text, types, extract, self.preserve_case, self.reduce_len, classifier) for tno_text in self.sents())
+            return Parallel(n_jobs=self.njobs)(delayed(TweetCorpus._clean2)(tno_text, self.preserve_case, self.reduce_len, self.get_classifier(), types, extract) for tno_text in self.sents())
         else:
-            return (TweetCorpus._get_tokens_by_type1(tno_text, types, extract, self.preserve_case, self.reduce_len, classifier) for tno_text in self.sents())
+            return (TweetCorpus._clean1(tno_ctokens, types, extract) for tno_ctokens in self.classify(parallel = False))
 
-    def get_classifier(self):
-        if not hasattr(self, 'classifier'):
-            self.classifier = TweetTokenClassifier(vocabulary = self.vocabulary)
+    def get_analyzer(self):
+        if not hasattr(self, 'analyzer'):
+            try:
+                from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+            except ImportError:
+                print("Install vaderSentiment to do sentiment analysis; pip install vaderSentiment")
+                return False
 
-        return self.classifier
+            self.analyzer = SentimentIntensityAnalyzer()
 
-    def clean(self, keep_types = ['contentword', 'stopword']):
-        return ((tweetno, ' '.join(w)) for tweetno,words in self.get_tokens_by_type(keep_types, extract='token'))
+        return self.analyzer
 
-    def build_vocabulary(self, types = ['contentword'], extract='token', parallel = None):
+    def sentiments(self, parallel = None):
+        if parallel is None:
+            parallel = self.parallel
+
+        if parallel:
+            return Parallel(n_jobs=self.njobs)(delayed(TweetCorpus._sentiment2)(tno_text, self.preserve_case, self.reduce_len, self.get_classifier(), ['contentword', 'stopword'], 'token', self.get_analyzer()) for tno_text in self.sents())
+        else:
+            return (TweetCorpus._sentiment1(tno_clean, self.get_analyzer()) for tno_clean in self.clean(types = ['contentword', 'stopword'], extract = 'token', parallel = False))
+
+    def build_vocabulary(self, types = ['contentword'], extract = 'token', parallel = None):
         return set([t for _,tokens in self.get_tokens_by_type(types, extract = extract, parallel = parallel) for t in tokens])
 
     def tokens_csv(self, filename, parallel = None):
@@ -145,41 +226,21 @@ class TweetCorpus:
                     ct['tweetno'] = tweetno
                     writer.writerow(ct)
 
-    # TODO: parallellize this function
-    def sentiments(self):
-        try:
-            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-        except ImportError:
-            print("Install vaderSentiment to do sentiment analysis; pip install vaderSentiment")
-            return False
-        
-        analyzer = SentimentIntensityAnalyzer()
-        
-        def __sentiment(tweet_clean):
-            vs = analyzer.polarity_scores(tweet_clean)
-            vs['tweet_clean'] = tweet_clean
-            return vs
-        
-        return ((tweetno, __sentiment(tweet_clean)) for tweetno, tweet_clean in self.clean())
-    
-    def sentiments_csv(self, filename):
-        def __append_tweetno(tweetno, scores):
-            scores['tweetno'] = tweetno
-            return scores
-        
-        fieldnames = ['tweetno', 'tweet_clean', 'pos', 'neg', 'neu', 'compound']
+    def sentiments_csv(self, filename, parallel = None):
+        fieldnames = ['tweetno', 'pos', 'neg', 'neu', 'compound']
         
         with open(filename, 'w') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames, quoting=csv.QUOTE_NONNUMERIC)
             writer.writeheader()
-            for tweetno, scores in self.sentiments():
-                writer.writerow(__append_tweetno(tweetno, scores))
-    
+            for tweetno, scores in self.sentiments(parallel = parallel):
+                scores['tweetno'] = tweetno
+                writer.writerow(scores)
+
     def retweets(self, parallel = None):
         # This is not a generator expression because usually, the entire set is needed
         if not hasattr(self, 'retweet_indices'):
             self.retweet_indices = [tweetno for tweetno,tokens in self.classify(parallel = parallel) if any([t['position'] < 1 and t['token'] in ['rt','RT'] for t in tokens])]
-        
+
         return self.retweet_indices
 
 class TweetTokenClassifier:
