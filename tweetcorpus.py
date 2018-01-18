@@ -213,7 +213,7 @@ class TweetCorpus:
             return (TweetCorpus._sentiment1(tno_clean, self.get_analyzer()) for tno_clean in self.clean(types = ['contentword', 'stopword'], extract = 'token', parallel = False))
 
     def build_vocabulary(self, types = ['contentword'], extract = 'token', parallel = None):
-        return set([t for _,tokens in self.get_tokens_by_type(types, extract = extract, parallel = parallel) for t in tokens])
+        return set([t.lower() for _,tokens in self.get_tokens_by_type(types, extract = extract, parallel = parallel) for t in tokens])
 
     def tokens_csv(self, filename, parallel = None):
         fieldnames = ['tweetno', 'position', 'token', 'stem', 'type']
@@ -375,7 +375,7 @@ class TweetTokenClassifier:
                 tokens[j - 1]['type'] in ['contentword', 'stopword', 'mention', 'hashtag', 'url'] and
                 not any([t['type'] in ['contentword', 'stopword'] for t in tokens[j:(len(tokens) - 1)]])):
                 if hasattr(self, 'vocabulary'):
-                    if (len(tokens[j - 1]['token']) < 2 or tokens[j - 1]['token'] not in self.vocabulary):
+                    if (len(tokens[j - 1]['token']) < 2 or tokens[j - 1]['token'].lower() not in self.vocabulary):
                         tokens[j - 1]['type'] = tokens[j - 1]['type'] + '_truncated'
                 else:
                     tokens[j - 1]['type'] = tokens[j - 1]['type'] + '_truncated'
