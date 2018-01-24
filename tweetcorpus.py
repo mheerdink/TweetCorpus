@@ -8,6 +8,7 @@ from types import GeneratorType # for GeneratorType
 
 class TweetCorpus:
     REPEAT_PATTERN = regex.compile(r'((\w)\2{3,})')
+    DASH_BEGIN_PATTERN = regex.compile('^(-+)(?=\p{letter})')
 
     """
     Class designed to simplify working with a corpus of raw tweets
@@ -69,7 +70,10 @@ class TweetCorpus:
         if reduce_len:
             text = TweetCorpus.REPEAT_PATTERN.sub(lambda m: m.groups()[1]*3, text)
 
-        return (tweetno, twokenize.tokenizeRawTweetText(text))
+        tokens = twokenize.tokenizeRawTweetText(text)
+        tokens = list(filter(None, [w for t in tokens for w in TweetCorpus.DASH_BEGIN_PATTERN.split(t)])) # also split on - in first position, if followed by a word char
+
+        return (tweetno, tokens)
 
     @staticmethod
     def _classify1(tno_text, tc):
@@ -215,26 +219,22 @@ class TweetCorpus:
     def build_vocabulary(self, types = ['contentword'], extract = 'token', parallel = None):
         return set([t.lower() for _,tokens in self.get_tokens_by_type(types, extract = extract, parallel = parallel) for t in tokens])
 
-    def tokens_csv(self, filename, parallel = None):
-        fieldnames = ['tweetno', 'position', 'token', 'stem', 'type']
-
+    def tokens_csv(self, filename, fieldnames = ['tweetno', 'position', 'token', 'stem', 'type'], parallel = None):
         with open(filename, 'w') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames, quoting=csv.QUOTE_NONNUMERIC)
             writer.writeheader()
             for tweetno, ctokens in self.classify(parallel = parallel):
                 for ct in ctokens:
                     ct['tweetno'] = tweetno
-                    writer.writerow(ct)
+                    writer.writerow({key: ct[key] for key in fieldnames})
 
-    def sentiments_csv(self, filename, parallel = None):
-        fieldnames = ['tweetno', 'pos', 'neg', 'neu', 'compound']
-        
+    def sentiments_csv(self, filename, fieldnames = ['tweetno', 'pos', 'neg', 'neu', 'compound'], parallel = None):
         with open(filename, 'w') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames, quoting=csv.QUOTE_NONNUMERIC)
             writer.writeheader()
             for tweetno, scores in self.sentiments(parallel = parallel):
                 scores['tweetno'] = tweetno
-                writer.writerow(scores)
+                writer.writerow({key: scores[key] for key in fieldnames})
 
     def retweets(self, parallel = None):
         # This is not a generator expression because usually, the entire set is needed
