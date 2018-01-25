@@ -8,7 +8,9 @@ from types import GeneratorType # for GeneratorType
 
 class TweetCorpus:
     REPEAT_PATTERN = regex.compile(r'((\w)\2{3,})')
+    MENTION_HASHTAG_REPEAT_PATTERN = regex.compile(r'((#|＃|@|＠)\2+)(?=[\w_])')
     DASH_BEGIN_PATTERN = regex.compile('^(-+)(?=\p{letter})')
+    MENTION_HASHTAG_APOSTROPHE_PATTERN = regex.compile(r'^((?:#|＃|@|＠)+[\w_]*[\w][\w_]*)([^\P{punctuation}_].*)$')
 
     """
     Class designed to simplify working with a corpus of raw tweets
@@ -69,11 +71,14 @@ class TweetCorpus:
 
         if reduce_len:
             text = TweetCorpus.REPEAT_PATTERN.sub(lambda m: m.groups()[1]*3, text)
+            text = TweetCorpus.MENTION_HASHTAG_REPEAT_PATTERN.sub(lambda m: m.groups()[1], text)
 
         tokens = twokenize.tokenizeRawTweetText(text)
-        tokens = list(filter(None, [w for t in tokens for w in TweetCorpus.DASH_BEGIN_PATTERN.split(t)])) # also split on - in first position, if followed by a word char
-
-        return (tweetno, tokens)
+        # clean / split the tokens a bit more
+        tokens = [w for t in tokens for w in TweetCorpus.DASH_BEGIN_PATTERN.split(t)] # also split on - in first position, if followed by a word char
+        tokens = [w for t in tokens for w in TweetCorpus.MENTION_HASHTAG_APOSTROPHE_PATTERN.split(t)] # split if there's punctuation attached to a mention or hashtag (e.g. #twitter's will be split as "#twitter" and "'s" which improves use of hashtags)
+        
+        return (tweetno, list(filter(None, tokens)))
 
     @staticmethod
     def _classify1(tno_text, tc):
