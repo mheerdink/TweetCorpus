@@ -9,14 +9,13 @@ from os.path import expanduser
 import tweetcorpus
 from datetime import datetime
 
-testfile = expanduser('~/Twitter/sampletweets.csv')
+testfile = expanduser('~/Twitter/sampletweets.txt')
 output = expanduser('~/Twitter/' + datetime.today().strftime('%Y%m%d%H%M%S') + '-tokens.csv')
 
 def tweetstream(filename):
-    with open(filename) as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            yield (int(row['tweetno']), row['Tweet.content'])
+    with open(filename, encoding = 'utf-8') as f:
+        for line in f:
+            yield line
 
 if __name__ == '__main__':
     tcp = tweetcorpus.TweetCorpus(corpus = tweetstream(testfile))
